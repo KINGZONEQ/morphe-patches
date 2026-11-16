@@ -10,6 +10,7 @@
 
 package app.morphe.extension.youtube.patches.components;
 
+import android.util.Log;
 import android.view.View;
 
 import java.util.List;
@@ -32,6 +33,13 @@ import app.morphe.extension.youtube.whitelist.WhitelistType;
 
 @SuppressWarnings("unused")
 public final class AdsFilter extends Filter {
+
+    // Debug logging for the modified build (2026-11-16): writes to logcat,
+    // tag NexAlloyAds, visible in the LSPosed log export. The constructor
+    // line proves the Hide ads patch initialized; the feedVideoAd lines show
+    // every feed card's buffer verdict. ASCII dump cannot show Chinese
+    // (赞助商广告 is UTF-8 multibyte), but the byte check still matches it.
+    private static final String LOG_TAG = "NexAlloyAds";
 
     private static final String[] PLAYER_POPUP_AD_PANEL_IDS = {
             "PAproduct", // Shopping.
@@ -58,6 +66,8 @@ public final class AdsFilter extends Filter {
     private final ByteArrayFilterGroup productCardBuffer;
     private final StringFilterGroup shortsPaidPromotionLabel;
     private final ByteArrayFilterGroup shortsPaidPromotionLabelBuffer;
+    private final StringFilterGroup feedVideoAd;
+    private final ByteArrayFilterGroup feedVideoAdBuffer;
 
     public AdsFilter() {
         exceptions.addPatterns(
@@ -74,7 +84,18 @@ public final class AdsFilter extends Filter {
                 Settings.HIDE_GENERAL_ADS,
                 "carousel_ad"
         );
-        addIdentifierCallbacks(carouselAd);
+
+        // YouTube 21.46.522: the home feed sponsored card is a video_lockup
+        // whose metadata is video_lockup_ads_metadata / feed_ad_metadata.
+        // The old identifiers (_ad_with, ads_video_with_context) no longer
+        // exist as components in 21.46.522, so the card escaped the filter.
+        // Identifier matches bypass the path exceptions in isFiltered.
+        final var feedAd = new StringFilterGroup(
+                Settings.HIDE_GENERAL_ADS,
+                "video_lockup_ads_metadata",
+                "feed_ad_metadata"
+        );
+        addIdentifierCallbacks(carouselAd, feedAd);
 
         // Paths.
 
@@ -86,6 +107,28 @@ public final class AdsFilter extends Filter {
         buyMovieAdBuffer = new ByteArrayFilterGroup(
                 null,
                 "FEstorefront"
+        );
+
+        // YouTube 21.46.522: the feed sponsored card's runtime identifier/path
+        // does not contain the template names (video_lockup_ads_metadata etc.),
+        // so the identifier/path patterns above never match it. Instead, match
+        // the feed video element itself (home/related video_with_context) and
+        // decide from the element buffer: an ad's buffer references the ads
+        // templates and/or carries the sponsored label, a regular video's
+        // buffer has neither. This runs before the path exceptions in
+        // isFiltered, so the home_video_with_context exception does not block it.
+        feedVideoAd = new StringFilterGroup(
+                Settings.HIDE_GENERAL_ADS,
+                "home_video_with_context",
+                "related_video_with_context"
+        );
+
+        feedVideoAdBuffer = new ByteArrayFilterGroup(
+                null,
+                "video_lockup_ads_metadata",
+                "feed_ad_metadata",
+                "赞助商广告",
+                "Sponsored"
         );
 
         final var generalAds = new StringFilterGroup(
@@ -119,7 +162,19 @@ public final class AdsFilter extends Filter {
                 "video_display_carousel_buttoned_short_dr_layout",
                 "video_display_full_buttoned_short_dr_layout",
                 "video_display_full_layout",
-                "watch_metadata_app_promo"
+                "watch_metadata_app_promo",
+                // YouTube 21.46.522 feed sponsored card components (verified
+                // against the 21.46.522 APK's Elements templates). All are
+                // ad-only; regular videos do not use them.
+                // Note: plain "ad_badge"/"ad_button" are NOT used here, they
+                // would also match download_badge/download_button.
+                "video_lockup_ads_metadata",
+                "feed_ad_metadata",
+                "carousel_ad_card_metadata",
+                "feed_ad_extension",
+                "ad_card_badge",
+                "ad_details_line",
+                "ad_button_group"
         );
 
         final var merchandise = new StringFilterGroup(
@@ -192,6 +247,7 @@ public final class AdsFilter extends Filter {
 
         addPathCallbacks(
                 buyMovieAd,
+                feedVideoAd,
                 generalAds,
                 merchandise,
                 movieAds,
@@ -203,6 +259,9 @@ public final class AdsFilter extends Filter {
                 shortsPaidPromotionLabel,
                 viewProducts
         );
+
+        Log.i(LOG_TAG, "AdsFilter created (hideads build): feedVideoAd buffer patterns = "
+                + "video_lockup_ads_metadata, feed_ad_metadata, 赞助商广告, Sponsored");
     }
 
     @Override
@@ -216,11 +275,21 @@ public final class AdsFilter extends Filter {
                               FilterContentType contentType,
                               int contentIndex) {
         if (contentType == FilterContentType.IDENTIFIER) {
+            Log.d(LOG_TAG, "identifier hit id=" + identifier + " path=" + path);
             return true;
         }
 
         if (matchedGroup == buyMovieAd) {
             return contentIndex == 0 && buyMovieAdBuffer.check(buffer).isFiltered();
+        }
+
+        if (matchedGroup == feedVideoAd) {
+            boolean filtered = feedVideoAdBuffer.check(buffer).isFiltered();
+            String ascii = asciiStrings.getStrings();
+            if (ascii.length() > 600) ascii = ascii.substring(0, 600);
+            Log.d(LOG_TAG, "feedVideoAd filtered=" + filtered + " id=" + identifier
+                    + " path=" + path + " ascii=" + ascii);
+            return filtered;
         }
 
         if (matchedGroup == productCard) {
